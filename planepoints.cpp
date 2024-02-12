@@ -11,6 +11,8 @@
 #include <vector>
 #include <sstream>
 
+using fs = std::fstream;
+
 // Vector 3
 struct Vector3
 {
@@ -132,6 +134,7 @@ struct Entity
 {
 	std::string editorclass;
 	std::string classname;
+	std::string script_flag;
 
 	Vector3 origin;
 	Vector3 mins;
@@ -333,21 +336,26 @@ void ParseFile(std::ifstream& ReadFile, std::vector<Entity>& entities)
 
 		std::string key = textLine.substr(keyStart, keyEnd - keyStart);
 		std::string value = textLine.substr(valueStart, valueEnd - valueStart);
-
+		
 		if (key == "editorclass")
 		{
-			std::cout << "Found editor class " << value << "\n";
+			//std::cout << "Found editor class " << value << "\n";
 			newEntity.editorclass = value;
 		}
 		else if (key == "origin")
 		{
 			newEntity.origin = ParseVector(value);
-			std::cout << "Found origin " << newEntity.origin.x << " " << newEntity.origin.y << " " << newEntity.origin.z << "\n";
+			//std::cout << "Found origin " << newEntity.origin.x << " " << newEntity.origin.y << " " << newEntity.origin.z << "\n";
 		}
 		else if (key == "classname")
 		{
-			std::cout << "Found classname " << value << "\n";
+			//std::cout << "Found classname " << value << "\n";
 			newEntity.classname = value;
+		}
+		else if (key == "script_flag")
+		{
+			//std::cout << "Found script_flag " << value << "\n";
+			newEntity.script_flag = value;
 		}
 		else if (key.find("*trigger_brush_") != std::string::npos)
 		{
@@ -491,10 +499,31 @@ int main(int argc, char* argv[])
 			}
 		}
 	}
-	std::cout << "sv_cheats 1;enable_debug_overlays 1;\n";
+	std::ofstream file("./result.nut", std::ios::out | std::ios::trunc);
+	file << "global function InitializeTriggerData\n\
+void function InitializeTriggerData()\n\
+{ \n\
+TriggerData trig";
 	//write drawlines
 	for (Entity& ent : entities)
 	{
+		if (ent.brushes.size() == 0)
+			continue;
+		/*
+		
+    vector origin
+    array<vector> vertices
+    string editorclass
+    string script_flag
+		*/
+		file << "{\ntrig = NewTriggerStruct()\n";
+		file << "trig.origin = < " << ent.origin.x << ", " << ent.origin.y << ", " << ent.origin.z << " >\n";
+		file << "trig.editorclass = \"" << ent.editorclass << "\"\n"; // istg if there's some fucking shit with " in it im exploding
+		file << "trig.script_flag = \"" << ent.script_flag << "\"\n";
+		file << "trig.color = <"
+			<< abs((int)ent.origin.x % 32) * 8 << ", "
+			<< abs((int)ent.origin.y % 32) * 8 << ", "
+			<< abs((int)ent.origin.z % 32) * 8 << ">\n";
 		for (Brush& brush : ent.brushes)
 		{
 			//std::cout << "\n";
@@ -502,22 +531,15 @@ int main(int argc, char* argv[])
 			{
 				Vector3 stem = ent.origin + edge.stem;
 				Vector3 tail = ent.origin + edge.tail;
-#if 1
-				std::cout << "script_client DebugDrawLine("
-					<< "Vector(" << stem.x << ", " << stem.y << ", " << stem.z << "), "
-					<< "Vector(" << tail.x << ", " << tail.y << ", " << tail.z << "), "
-					<< abs((int)ent.origin.x % 32) * 8 << ", "
-					<< abs((int)ent.origin.y % 32) * 8 << ", "
-					<< abs((int)ent.origin.z % 32) * 8 << ", false, 60); \n";
-#else
-				// Desmos 3D lol
-				std::cout << "["
-					<< "(" << stem.x << ", " << stem.y << ", " << stem.z << "), "
-					<< "(" << tail.x << ", " << tail.y << ", " << tail.z << ")"
-					<< "]\n";
-#endif
+
+				file << "trig.edges.append("
+					<< "Vector(" << stem.x << ", " << stem.y << ", " << stem.z << "));"
+					<< "trig.edges.append(Vector(" << tail.x << ", " << tail.y << ", " << tail.z << "))\n";
 			}
 		}
+		file << "AddTrigger(trig)\n";
+		file << "}\n";
 	}
-	std::cin.get();
+	file << "}\n";
+	file.close();
 }

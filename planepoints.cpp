@@ -1,7 +1,3 @@
-//Trigger outline display generator for Titanfall 2 maps.
-//This code creates a series of console commands which can be run in VanillaPlus (or some similar mod) to create a simple outline of trigger entities.
-//If you want to view triggers in Respawn's T2 maps, you don't need to run this. The files already exist elsewhere in this repository.
-//Created by Pinsplash, much help from OxzyBox.
 #include <stdio.h>
 #include <math.h>
 //#include <cmath.h>
@@ -12,6 +8,28 @@
 #include <sstream>
 
 using fs = std::fstream;
+
+#define DEBUG_LOG 0
+
+struct Settings
+{
+	bool defaultAllow = true;
+	bool drawontop = true;
+	std::vector<std::string> allows;
+	std::vector<std::string> disallows;
+	std::vector<std::string> musts;
+	std::vector<std::string> avoids;
+	std::vector<std::string> clrOverrides;
+	int duration = 60;
+	bool drawTriggerOutlines = true;
+	bool drawEntCubes = false;
+	float min_x = -INFINITY;
+	float max_x = INFINITY;
+	float min_y = -INFINITY;
+	float max_y = INFINITY;
+	float min_z = -INFINITY;
+	float max_z = INFINITY;
+};
 
 // Vector 3
 struct Vector3
@@ -50,6 +68,10 @@ Vector3& operator*= (Vector3& l, float r)
 	l.y *= r;
 	l.z *= r;
 	return l;
+}
+bool operator== (const Vector3& l, const Vector3& r)
+{
+	return (l.x == r.x) && (l.y == r.y) && (l.z == r.z);
 }
 
 // Vector 4
@@ -114,6 +136,8 @@ struct Plane
 {
 	Vector3 normal;
 	float dist = 0;
+	bool skip = false;
+	bool bbox = false;
 };
 
 struct Edge
@@ -134,12 +158,19 @@ struct Entity
 {
 	std::string editorclass;
 	std::string classname;
+	std::string targetname;
 	std::string script_flag;
+	std::string script_name;
+	std::string scr_flagTrueAll;
+	std::string scr_flagFalseAll;
+	std::string scr_flagSet;
+	std::string spawnclass;
 
 	Vector3 origin;
 	Vector3 mins;
 	Vector3 maxs;
 
+	bool isTrigger = false;
 	std::vector<Brush> brushes;
 };
 
@@ -286,20 +317,29 @@ Vector3 ParseVector(const std::string& str)
 	return v;
 }
 
-Plane ParsePlane(const std::string& str)
+Plane ParsePlane(const std::string& str, Vector3 origin)
 {
 	// Parse the plane
 	Plane plane;
 	sscanf_s(str.c_str(), "%f %f %f %f", &plane.normal.x, &plane.normal.y, &plane.normal.z, &plane.dist);
+
+#if DEBUG_LOG
+	//debug
+	Vector3 vecPlanePos = plane.normal * plane.dist;
+	std::cout << "script_client DebugDrawLine(Vector(" << origin.x << ", " << origin.y << ", " << origin.z << "), Vector(" << origin.x + vecPlanePos.x << ", " << origin.y + vecPlanePos.y << ", " << origin.z + vecPlanePos.z << "), 255, 255, 255, false, 60); \n";
+#endif
+
 	return plane;
 }
+
+constexpr float k_flEpsilon = 0.001f;
 
 void ParseFile(std::ifstream& ReadFile, std::vector<Entity>& entities)
 {
 	std::string textLine;
-
 	Entity newEntity;
-
+	int iSkipBB = 0;
+	int iLastBrush = 0;
 	while (getline(ReadFile, textLine))
 	{
 		// Skip any blank lines
@@ -338,19 +378,37 @@ void ParseFile(std::ifstream& ReadFile, std::vector<Entity>& entities)
 		std::string value = textLine.substr(valueStart, valueEnd - valueStart);
 		
 		if (key == "editorclass")
-		{
-			//std::cout << "Found editor class " << value << "\n";
 			newEntity.editorclass = value;
-		}
+
 		else if (key == "origin")
-		{
 			newEntity.origin = ParseVector(value);
-			//std::cout << "Found origin " << newEntity.origin.x << " " << newEntity.origin.y << " " << newEntity.origin.z << "\n";
-		}
+
+		else if (key == "targetname")
+			newEntity.targetname = value;
+
+		else if (key == "script_flag")
+			newEntity.script_flag = value;
+
+		else if (key == "script_name")
+			newEntity.script_name = value;
+
+		else if (key == "scr_flagTrueAll")
+			newEntity.scr_flagTrueAll = value;
+
+		else if (key == "scr_flagFalseAll")
+			newEntity.scr_flagFalseAll = value;
+
+		else if (key == "scr_flagSet")
+			newEntity.scr_flagSet = value;
+
+		else if (key == "spawnclass")
+			newEntity.spawnclass = value;
+
 		else if (key == "classname")
 		{
-			//std::cout << "Found classname " << value << "\n";
 			newEntity.classname = value;
+			iSkipBB = 0;
+			iLastBrush = 0;
 		}
 		else if (key == "script_flag")
 		{
@@ -359,6 +417,7 @@ void ParseFile(std::ifstream& ReadFile, std::vector<Entity>& entities)
 		}
 		else if (key.find("*trigger_brush_") != std::string::npos)
 		{
+			newEntity.isTrigger = true;
 			//std::cout << "string " << key << "\n";
 			const std::string token1 = "*trigger_brush_";
 			size_t brushDigitsPos = key.find("_", token1.length());//some triggers have 10+ brushes
@@ -366,12 +425,24 @@ void ParseFile(std::ifstream& ReadFile, std::vector<Entity>& entities)
 			int iBrush = stoi(key.substr(token1.length(), brushNumDigits));
 			//std::cout << "brush " << brush << ", ";
 
+			if (iLastBrush != iBrush)
+			{
+				iSkipBB = 0;
+				iLastBrush = iBrush;
+			}
 			const std::string token2 = "_plane_";
 			int iPlane = stoi(key.substr(token1.length() + brushNumDigits + token2.length()));
 			//std::cout << "iPlane " << iPlane << ", ";
 
 			// Parse the plane
-			Plane plane = ParsePlane(value);
+			Plane plane = ParsePlane(value, newEntity.origin);
+
+			if (iSkipBB <= 5)//0-5 are bounding box of the brush
+			{
+				//std::cout << "Found BB plane " << iSkipBB << "\n";
+				iSkipBB++;
+				plane.bbox = true;
+			}
 
 			// Normally, I'd just use pushback, but these have IDs soooo idk
 
@@ -386,121 +457,708 @@ void ParseFile(std::ifstream& ReadFile, std::vector<Entity>& entities)
 			if (brush.planes.size() <= iPlane)
 				brush.planes.resize(iPlane + 1);
 
+			//don't add plane if clone exists
+			int nPlanes = brush.planes.size();
+			for (int iPlane2 = 0; iPlane2 < nPlanes; iPlane2++)
+			{
+				Plane& plane2 = brush.planes[iPlane2];
+				float f = dotProduct(plane.normal, plane2.normal);
+				//std::cout << "Plane " << iPlane << " and " << iPlane2 << " dot product is " << f << "\n";
+
+				if (f == 1)
+				{
+					//std::cout << "Clone Plane: " << iPlane << " and " << iPlane2 << "\n";
+					plane.skip = true;
+				}
+			}
+
 			// Set the plane
 			brush.planes[iPlane] = plane;
+#if DEBUG_LOG
+			std::cout << "Add plane " << iPlane << "\n";
+#endif
 		}
 		else if (key == "*trigger_bounds_mins")
-		{
 			newEntity.mins = ParseVector(value);
-		}
 		else if (key == "*trigger_bounds_maxs")
-		{
 			newEntity.maxs = ParseVector(value);
-		}
 	}
 }
 
-constexpr float k_flEpsilon = 0.0001f;
 
-
-int main(int argc, char* argv[])
+bool IsNear( float a, float b, float eps = k_flEpsilon )
 {
-	std::vector<Entity> entities;
+	float c = a - b;
+	return -eps < c && c < eps;
+}
 
-	//read entity data
-	std::ifstream ReadFile(argc == 1 ? "filename.txt" : argv[1]);
-	ParseFile(ReadFile, entities);
-	ReadFile.close();
 
-	//get line from two intersecting planes
-	//every plane in a brush must be checked against all others in the brush
-	for (Entity& ent : entities)
+bool ShouldSkipPlane( const Plane& plane1, const Plane& plane2 )
+{
+	// Are 1 and 2 parallel or opposing? If so, there will never be a intersection
+	float f = dotProduct( plane1.normal, plane2.normal );
+	if ( IsNear( fabs( f ), 1.0 ) )
 	{
-		for (Brush& brush : ent.brushes)
+#if DEBUG_LOG
+		std::cout << "Intersection between planes " << iPlane1 << ", " << iPlane2 << " skipped because parallel\n";
+#endif
+		return true;
+	}
+	return false;
+}
+
+bool TestPointInBrush( const Brush& brush, const Vector3& p )
+{
+	// Test if the point is past any planes on the brush
+	for ( const Plane &k : brush.planes )
+	{
+		if ( k.skip )
+			continue;
+
+		// Get the dist of the point for the plane normal
+		if ( dotProduct( p, k.normal ) - k.dist > k_flEpsilon )
+			return false;
+	}
+
+	// Passed all plane tests!
+	return true;
+}
+
+
+// Each edge pair corresponds to two planes
+constexpr uint32_t k_iInvalidVertex = 0xFFFFFFFF;
+struct EdgePair
+{
+	uint32_t iVertex1;
+	uint32_t iVertex2;
+};
+
+// Util class for building brush edge lists
+class BrushBuilder
+{
+public:
+	BrushBuilder();
+	~BrushBuilder();
+
+
+	void Build( Brush& brush );
+
+private:
+
+	void BeginBrush( int nPlanes );
+
+	// Returns the edge shared by two planes, x and y
+	EdgePair& GetEdge( int x, int y );
+
+	// Adds a vertex onto a given edge shared by two planes, x and y 
+	// Returns true when the given edge now has two pairs
+	bool PushPartialEdge( int x, int y, uint32_t iVert );
+
+	// Stores a vertex and returns its index or returns the index of the vertex if it's already stored
+	uint32_t StoreVertex( const Vector3& newVert );
+
+	int m_nPlaneCount;
+
+	// This is a triangular array of all potential edge pairings between planes
+	int m_nEdgeCount;
+	int m_nEdgeCapacity;
+	EdgePair* m_pEdgePairs;
+
+	// This is a set of all vertices with no duplicates
+	std::vector<Vector3> m_vecVerts;
+};
+
+
+BrushBuilder::BrushBuilder()
+{
+	m_nPlaneCount = 0;
+	m_nEdgeCount = 0;
+	m_nEdgeCapacity = 0;
+	m_pEdgePairs = nullptr;
+
+	// Setup with basic starter data
+	BeginBrush( 6 );
+}
+
+BrushBuilder::~BrushBuilder()
+{
+	delete[] m_pEdgePairs;
+}
+
+void BrushBuilder::BeginBrush( int nPlanes )
+{
+	// Each plane can share an edge with another plane.
+	// If each plane were to interact with every other plane (including itself), that'd be n^2 edges
+	// We can optimize this down, as an edge between plane1 and plane2 is the same as an edge between plane2 and plane1
+	// We also don't care about interactions between plane1 and plane1, as the a plane cannot intersect with itself
+	// This is just the formula to find the nth triangular number, but we're subtracting 1 off nPlanes
+	int nPotentialEdges = ( nPlanes - 1 ) * nPlanes / 2;
+
+	// If we need more space, then resize our pairs
+	if ( nPotentialEdges > m_nEdgeCapacity )
+	{
+		delete[] m_pEdgePairs;
+		m_pEdgePairs = new EdgePair[nPotentialEdges];
+		m_nEdgeCapacity = nPotentialEdges;
+	}
+
+	// Store the new values
+	m_nPlaneCount = nPlanes;
+	m_nEdgeCount = nPotentialEdges;
+
+	// Clear out the old data
+	memset( m_pEdgePairs, 0xFF, nPotentialEdges * sizeof( EdgePair ) );
+	m_vecVerts.clear();
+}
+
+EdgePair& BrushBuilder::GetEdge( int x, int y )
+{
+	// Ensure the lowest is always plane y
+	if ( x < y )
+		std::swap( x, y );
+	
+	// Get the index within our triangular array
+	// I thought indexing into this would be easier, but oh well!
+
+	// Sum of an arithmetic series to get the row Y
+	int a1  = m_nPlaneCount - 1;
+	int an  = m_nPlaneCount - y;
+	int n   = y;
+	int sum = y * ( a1 + an ) / 2;
+
+	// Get the index for column x
+	int idx = sum + (x - y - 1);
+
+	// return the edge!
+	return m_pEdgePairs[idx];
+}
+
+bool BrushBuilder::PushPartialEdge( int x, int y, uint32_t iVertex )
+{
+	EdgePair& edge = GetEdge( x, y );
+
+
+	// If it's already on the edge, ignore the request
+	if ( edge.iVertex1 == iVertex || edge.iVertex2 == iVertex )
+	{
+		// We need to still return true if the edge is full!
+		// One of the two verts are already valid, we always fill iVertex1 first, so iVertex2 is either valid or invalid
+		return edge.iVertex2 == k_iInvalidVertex ? false : true;
+	}
+
+	// Fill iVertex1 first
+	if ( edge.iVertex1 == k_iInvalidVertex )
+	{
+		edge.iVertex1 = iVertex;
+		return false;
+	}
+	
+	// Fill iVertex2 last
+	if ( edge.iVertex2 == k_iInvalidVertex )
+	{
+		edge.iVertex2 = iVertex;
+		return true;
+	}
+
+	// Uh oh, pushing a third vert?
+	const Vector3& v1 = m_vecVerts[edge.iVertex1];
+	const Vector3& v2 = m_vecVerts[edge.iVertex2];
+	const Vector3& v3 = m_vecVerts[iVertex];
+	/*
+	std::cout << "Hey!! The edge (" << x << "," << y << ") already has two verts!\n";
+	std::cout << "\t Vertex 1 : " << v1.x << ", " << v1.y << ", " << v1.z << "\n";
+	std::cout << "\t Vertex 2 : " << v2.x << ", " << v2.y << ", " << v2.z << "\n";
+	std::cout << "\t Vertex 3 : " << v3.x << ", " << v3.y << ", " << v3.z << "\n";
+	*/
+	return true;
+}
+
+
+uint32_t BrushBuilder::StoreVertex( const Vector3& newVert )
+{
+	// Ideally, we'd just be using std::set or std::unordered_set, but both are being a pain to use..
+
+	// Find a vert with the value close enough to our newVert
+	int n = m_vecVerts.size();
+	for ( int i = 0; i < n; i++ )
+	{
+		const Vector3& curVert = m_vecVerts[i];
+		if ( IsNear( curVert.x, newVert.x ) && IsNear( curVert.y, newVert.y ) && IsNear( curVert.z, newVert.z ) )
+			return i;
+	}
+
+	// No duplicate found! We'll need to store it then
+	int idx = m_vecVerts.size();
+	m_vecVerts.push_back( newVert );
+	return idx;
+}
+
+
+void BrushBuilder::Build( Brush& brush )
+{
+	int nPlanes = brush.planes.size();
+
+	// We need at least 4 plans for a brush
+	if (nPlanes < 4)
+	{
+		std::cout << "Less than 4 planes!\n";
+		return;
+	}
+
+	// Good brush! We can begin!
+	BeginBrush( nPlanes );
+
+	// Note: If issues come up with points not combining up properly, then it
+	//       might be worth while to recenter everything for floating point accuracy
+
+
+	// Get all plane intersections
+	for (int iPlane1 = 0; iPlane1 < nPlanes - 2; iPlane1++)
+	{
+		Plane& plane1 = brush.planes[iPlane1];
+		if (plane1.skip)
+			continue;
+		
+		for (int iPlane2 = iPlane1 + 1; iPlane2 < nPlanes - 1; iPlane2++)
 		{
-			int nPlanes = brush.planes.size();
-
-			// We need at least 4 plans for a brush
-			if (nPlanes < 4)
-			{
-				std::cout << "Less than 4 planes!\n";
+			Plane& plane2 = brush.planes[iPlane2];
+			if (plane2.skip)
 				continue;
-			}
 
-			// Get all plane intersections
-			for (int iPlane1 = 0; iPlane1 < nPlanes; iPlane1++)
+			// Is it parallel or opposing?
+			if ( ShouldSkipPlane( plane1, plane2 ) )
+				continue;
+
+			// Loop for the other remaining untested planes
+			for (int iPlane3 = iPlane2 + 1; iPlane3 < nPlanes; iPlane3++)
 			{
-				Plane& plane1 = brush.planes[iPlane1];
-				for (int iPlane2 = iPlane1 + 1; iPlane2 < nPlanes; iPlane2++)
+				Plane& plane3 = brush.planes[iPlane3];
+				if (plane3.skip)
+					continue;
+
+				// Is it parallel or opposing?
+				if ( ShouldSkipPlane( plane3, plane1 ) )
+					continue;
+				if ( ShouldSkipPlane( plane3, plane2 ) )
+					continue;
+
+				// Do our 3 planes intersect? If not, next plane
+				Vector3 p;
+				if (!PlaneIntersect(plane1, plane2, plane3, &p))
 				{
-					Plane& plane2 = brush.planes[iPlane2];
+#if DEBUG_LOG
+					std::cout << "Intersection between planes " << iPlane1 << ", " << iPlane2 << ", " << iPlane3 << " skipped because they don't intersect\n";
+#endif
+					continue;
+				}
 
-					// Are 1 and 2 opposing and/or parallel? If so, there will never be a intersection
-					float f = dotProduct(plane1.normal, plane2.normal);
-					if (fabs(fabs(f) - 1.0) < k_flEpsilon) // f is near -1.0 or 1.0
-						continue;
+				// Cull points outside of the solid
+				if ( !TestPointInBrush( brush, p ) )
+					continue;
 
-					// Planes 1 and 2 share an edge
-					Edge edge;
-					int intersectCount = 0;
+#if DEBUG_LOG
+				std::cout << "Intersection between planes " << iPlane1 << ", " << iPlane2 << ", " << iPlane3 << " found\n";
+#endif
 
-					// Loop for the other remaining untested planes
-					for (int iPlane3 = iPlane2 + 1; iPlane3 < nPlanes; iPlane3++)
-					{
-						Plane& plane3 = brush.planes[iPlane3];
+				// Good intersection! Store the point and push the three partial edges
+				uint32_t iVert = StoreVertex( p );
 
-						// Do our 3 planes intersect? If not, next plane.
-						Vector3 p;
-						if (!PlaneIntersect(plane1, plane2, plane3, &p))
-							continue;
-						// Hit!
+				PushPartialEdge( iPlane3, iPlane1, iVert );
+				PushPartialEdge( iPlane3, iPlane2, iVert );
 
-						// Cull points outside of the solid
-						bool in = true;
-						for (Plane& k : brush.planes)
-						{
-							// Skip the planes we're currently working on
-							if (&k == &plane1 || &k == &plane2 || &k == &plane3)
-								continue;
-
-							// Get the dist of the point for the plane normal
-							if (dotProduct(p, k.normal) - k.dist > k_flEpsilon)
-							{
-								in = false;
-								break;
-							}
-						}
-
-						// Out of the solid. Skip it
-						if (!in)
-							continue;
-
-						// This one's good! Store it onto the edge
-						if (intersectCount == 0)
-							edge.stem = p;
-						else
-							edge.tail = p;
-						intersectCount++;
-
-						if (intersectCount == 2)
-						{
-							// Completed edge!
-							brush.edges.push_back(edge);
-							break;
-						}
-					}
-
-					if (intersectCount == 2)
-					{
-						// Completed edge!
-						continue;
-					}
+				if ( PushPartialEdge( iPlane2, iPlane1, iVert ) )
+				{
+					// Our pair is full! No need to compute more intersections for iPlane1 and iPlane2
+#if DEBUG_LOG
+					std::cout << "Intersection between planes " << iPlane1 << ", " << iPlane2 << " completed edge\n";
+#endif
+					break;
 				}
 			}
 		}
 	}
+
+	// Emit edges
+	int iEdge = 0;
+	for ( int iPlane1 = 0; iPlane1 < nPlanes - 1; iPlane1++ )
+	{
+		for ( int iPlane2 = iPlane1 + 1; iPlane2 < nPlanes; iPlane2++ )
+		{
+			EdgePair& edge = m_pEdgePairs[iEdge++];
+
+			// Skip invalid edges
+			if ( edge.iVertex1 == k_iInvalidVertex || edge.iVertex2 == k_iInvalidVertex )
+				continue;
+
+			//weed out duplicates
+			bool dupe = false;
+			for (Edge& existingEdge : brush.edges)
+			{
+				//stems match and tails match
+				if (m_vecVerts[edge.iVertex1] == existingEdge.stem && m_vecVerts[edge.iVertex2] == existingEdge.tail)
+					dupe = true;
+				//inverse match
+				if (m_vecVerts[edge.iVertex1] == existingEdge.tail && m_vecVerts[edge.iVertex2] == existingEdge.stem)
+					dupe = true;
+			}
+			if (dupe)
+				continue;
+
+			// Emit!
+			brush.edges.push_back( { m_vecVerts[edge.iVertex1], m_vecVerts[edge.iVertex2] } );
+		}
+		file << "AddTrigger(trig)\n";
+		file << "}\n";
+	}
+}
+int ReadSettings(std::ifstream& ReadFile, Settings& settings)
+{
+	std::string textLine;
+	bool inComment = false;
+	while (getline(ReadFile, textLine))
+	{
+		//std::cout << textLine << "\n";
+		if (textLine.size() == 0)
+			continue;
+
+		//comments
+		if (textLine[0] == '/' && textLine[1] == '/')
+			continue;
+		else if (textLine[0] == '/' && textLine[1] == '*')//decent but not as good as c++
+			inComment = true;
+		else if (textLine[0] == '*' && textLine[1] == '/')
+			inComment = false;
+		if (inComment)
+			continue;
+
+		size_t keyStart = textLine.find('"');
+		size_t keyEnd = textLine.find('"', keyStart + 1);
+		size_t valueStart = textLine.find('"', keyEnd + 1);
+		size_t valueEnd = textLine.find('"', valueStart + 1);
+
+		keyStart++;
+		valueStart++;
+
+		std::string key = textLine.substr(keyStart, keyEnd - keyStart);
+		std::string value = textLine.substr(valueStart, valueEnd - valueStart);
+		//std::cout << "key " << key << " value " << value << "\n";
+		if (key == "default")
+		{
+			if (!strcmp(value.c_str(), "allow"))
+				settings.defaultAllow = true;
+			else if (!strcmp(value.c_str(), "disallow"))
+				settings.defaultAllow = false;
+			else
+			{
+				std::cout << "Unknown setting for " << key << ". Should be either 'allow' or 'disallow'.\n";
+				return 0;
+			}
+		}
+		else if (key == "drawontop")
+		{
+			if (!strcmp(value.c_str(), "yes"))
+				settings.drawontop = true;
+			else if (!strcmp(value.c_str(), "no"))
+				settings.drawontop = false;
+			else
+			{
+				std::cout << "Unknown setting for " << key << ". Should be either 'yes' or 'no'.\n";
+				return 0;
+			}
+		}
+		else if (key == "drawtriggeroutlines")
+		{
+			if (!strcmp(value.c_str(), "yes"))
+				settings.drawTriggerOutlines = true;
+			else if (!strcmp(value.c_str(), "no"))
+				settings.drawTriggerOutlines = false;
+			else
+			{
+				std::cout << "Unknown setting for " << key << ". Should be either 'yes' or 'no'.\n";
+				return 0;
+			}
+		}
+		else if (key == "drawentcubes")
+		{
+			if (!strcmp(value.c_str(), "yes"))
+				settings.drawEntCubes = true;
+			else if (!strcmp(value.c_str(), "no"))
+				settings.drawEntCubes = false;
+			else
+			{
+				std::cout << "Unknown setting for " << key << ". Should be either 'yes' or 'no'.\n";
+				return 0;
+			}
+		}
+		else if (key == "duration")
+			settings.duration = stoi(value);
+
+		else if (key == "allow" && !settings.defaultAllow)
+			settings.allows.push_back(value);
+
+		else if (key == "disallow" && settings.defaultAllow)
+			settings.disallows.push_back(value);
+
+		else if (key == "must")
+			settings.musts.push_back(value);
+
+		else if (key == "avoid")
+			settings.avoids.push_back(value);
+
+		else if (key == "color")
+			settings.clrOverrides.push_back(value);
+
+		else if (key == "min_x")
+				settings.min_x = stof(value);
+		else if (key == "max_x")
+				settings.max_x = stof(value);
+		else if (key == "min_y")
+				settings.min_y = stof(value);
+		else if (key == "max_y")
+				settings.max_y = stof(value);
+		else if (key == "min_z")
+				settings.min_z = stof(value);
+		else if (key == "max_z")
+				settings.max_z = stof(value);
+	}
+	return 1;
+}
+
+bool StringMatch(std::string strEnt, std::string strSetting)
+{
+	if (strEnt == strSetting)
+		return true;
+	const char* caEnt = strEnt.c_str();
+	const char* caSetting = strSetting.c_str();
+	while (*caEnt && *caSetting)
+	{
+		unsigned char cEnt = *caEnt;
+		unsigned char cSetting = *caSetting;
+		if (cEnt != cSetting)
+			break;
+		caEnt++;
+		caSetting++;
+	}
+	if (*caSetting == 0 && *caEnt == 0)
+		return true;
+	if (*caSetting == '*' && !strEnt.empty())
+		return true;
+	return false;
+}
+
+bool CriteriaMet(std::string& key, std::string& value, Entity& ent)
+{
+	if (key == "classname")
+		return StringMatch(ent.classname, value);
+	else if (key == "editorclass")
+		return StringMatch(ent.editorclass, value);
+	else if (key == "script_flag")
+		return StringMatch(ent.script_flag, value);
+	else if (key == "script_name")
+		return StringMatch(ent.script_name, value);
+	else if (key == "scr_flagTrueAll")
+		return StringMatch(ent.scr_flagTrueAll, value);
+	else if (key == "scr_flagFalseAll")
+		return StringMatch(ent.scr_flagFalseAll, value);
+	else if (key == "scr_flagSet")
+		return StringMatch(ent.scr_flagSet, value);
+	else if (key == "spawnclass")
+		return StringMatch(ent.spawnclass, value);
+	else if (key == "targetname")
+		return StringMatch(ent.targetname, value);
+	else if (key == "_istrigger")
+		return ent.isTrigger;
+	else
+		std::cout << "Did not recognize property named " << key << ".\n";
+	return false;
+}
+
+int BaseColorOffCoord(float coord)
+{
+	return (((abs((int)coord % 64) * 4) + 128) / 1.5);
+}
+
+bool FilterXYZ(Settings& settings, Vector3 origin)
+{
+	if (settings.min_x > origin.x ||
+		settings.min_y > origin.y ||
+		settings.min_z > origin.z ||
+		settings.max_x < origin.x ||
+		settings.max_y < origin.y ||
+		settings.max_z < origin.z)
+		return false;
+	return true;
+}
+
+//monstrosity
+void ParsePair(std::string& line, std::string& key, std::string& value, char c1, char c2, char c3, std::string* rest = NULL)
+{
+	size_t keyStart = line.find(c1);
+	size_t keyEnd = line.find(c2, keyStart + 1);
+	size_t valueEnd = line.find(c3, keyEnd + 1);
+
+	keyStart++;
+	key = line.substr(keyStart, keyEnd - keyStart);
+
+	keyEnd++;
+	value = line.substr(keyEnd, valueEnd - keyEnd);
+
+	if (rest != NULL)
+		*rest = line.substr(valueEnd);
+}
+
+bool PassesFilters(Settings& settings, Entity& ent)
+{
+	//filtering
+	bool allowed = false;
+	bool disallowed = false;
+
+	//allow for blacklist
+	if (!settings.defaultAllow)
+	{
+		for (std::string& line : settings.allows)
+		{
+			std::string key;
+			std::string value;
+			ParsePair(line, key, value, '"', ' ', '"');
+			allowed = CriteriaMet(key, value, ent);
+			if (allowed)
+				break;//found something that allows us, even one thing
+		}
+	}
+
+	//re-dis-allow for blacklist
+	//or
+	//disallow for whitelist
+	for (std::string& line : settings.disallows)
+	{
+		std::string key;
+		std::string value;
+		ParsePair(line, key, value, '"', ' ', '"');
+		disallowed = CriteriaMet(key, value, ent);
+		if (disallowed)
+			break;
+	}
+
+	//re-allow for whitelist
+	if (settings.defaultAllow)
+	{
+		for (std::string& line : settings.allows)
+		{
+			std::string key;
+			std::string value;
+			ParsePair(line, key, value, '"', ' ', '"');
+			allowed = CriteriaMet(key, value, ent);
+			if (allowed)
+				break;
+		}
+	}
+	//std::cout << ent.classname << " defaultAllow " << (settings.defaultAllow ? "true" : "false") << ", disallowed " << (disallowed ? "true" : "false") << ", allowed " << (allowed ? "true" : "false") << "\n";
+	if (settings.defaultAllow)
+	{
+		if (disallowed && !allowed)
+			return false;//got disallowed, no re-allow
+	}
+	else
+	{
+		if (!allowed)
+			return false;//never was allowed
+	}
+
+	bool goodMusts = true;
+	for (std::string& line : settings.musts)
+	{
+		std::string key;
+		std::string value;
+		ParsePair(line, key, value, '"', ' ', '"');
+		goodMusts = CriteriaMet(key, value, ent);
+		if (!goodMusts)
+			break;
+	}
+
+	if (!goodMusts)
+		return false;
+
+	bool badAvoids = false;
+	for (std::string& line : settings.avoids)
+	{
+		std::string key;
+		std::string value;
+		ParsePair(line, key, value, '"', ' ', '"');
+		badAvoids = CriteriaMet(key, value, ent);
+		if (badAvoids)
+			break;
+	}
+
+	if (badAvoids)
+		return false;
+
+	if (!FilterXYZ(settings, ent.origin))
+		return false;
+
+	return true;
+}
+
+bool ColorOverride(Settings& settings, Entity& ent, int* color)
+{
+	for (std::string& line : settings.clrOverrides)
+	{
+		std::string key;
+		std::string value;
+		std::string rest;
+		ParsePair(line, key, value, '"', ' ', ' ', &rest);
+		if (CriteriaMet(key, value, ent))
+		{
+			Vector3 vecClr = ParseVector(rest);
+			color[0] = vecClr.x;
+			color[1] = vecClr.y;
+			color[2] = vecClr.z;
+			return true;
+		}
+	}
+	return false;
+}
+
+int main(int argc, char* argv[])
+{
+	bool debug = argc == 1;
+	std::vector<Entity> entities;
+	Settings settings;
+
+	//settings
+	std::cout << "Got file(s). Please drag settings file onto window and press ENTER, or just press ENTER to go without one.\n";
+	std::string settingspath;
+	std::getline(std::cin, settingspath);
+	std::ifstream ReadSettingsFile(settingspath);
+	bool n = ReadSettings(ReadSettingsFile, settings);
+	ReadSettingsFile.close();
+
+	for (int i = 1; debug || i < argc; i++)
+	{
+		debug = false;
+		entities.clear();
+		//read entity data
+		std::string path = argc == 1 ? "filename.txt" : argv[i];
+		std::ifstream ReadFile(path);
+		std::string base_filename = path.substr(path.find_last_of("/\\") + 1);
+		std::string::size_type const p(base_filename.find_last_of('.'));
+		std::string file_without_extension = base_filename.substr(0, p);
+		ParseFile(ReadFile, entities);
+		ReadFile.close();
+
+		BrushBuilder bb;
+
+		//get line from two intersecting planes
+		//every plane in a brush must be checked against all others in the brush
+		for (Entity& ent : entities)
+			for (Brush& brush : ent.brushes)
+				bb.Build(brush);
+
+		std::ofstream writingFile;
+		writingFile.open(file_without_extension + ".nut");
+		std::cout << "Starting writing to " << file_without_extension << ".nut\n";
 	std::ofstream file("./result.nut", std::ios::out | std::ios::trunc);
-	file << "global function InitializeTriggerData\n\
+	/*file << "global function InitializeTriggerData\n\
 void function InitializeTriggerData()\n\
 { \n\
 TriggerData trig";
@@ -515,31 +1173,85 @@ TriggerData trig";
     array<vector> vertices
     string editorclass
     string script_flag
-		*/
-		file << "{\ntrig = NewTriggerStruct()\n";
-		file << "trig.origin = < " << ent.origin.x << ", " << ent.origin.y << ", " << ent.origin.z << " >\n";
-		file << "trig.editorclass = \"" << ent.editorclass << "\"\n"; // istg if there's some fucking shit with " in it im exploding
-		file << "trig.script_flag = \"" << ent.script_flag << "\"\n";
-		file << "trig.color = <"
-			<< abs((int)ent.origin.x % 32) * 8 << ", "
-			<< abs((int)ent.origin.y % 32) * 8 << ", "
-			<< abs((int)ent.origin.z % 32) * 8 << ">\n";
-		for (Brush& brush : ent.brushes)
+		
+		for (Brush& brush : ent.brushes)*/
+		writingFile << "global function InitializeTriggerData\n\
+void function InitializeTriggerData()\n\
+{ \n\
+TriggerData trig\n";
+		//write drawlines
+		for (Entity& ent : entities)
 		{
-			//std::cout << "\n";
-			for (Edge& edge : brush.edges)
-			{
-				Vector3 stem = ent.origin + edge.stem;
-				Vector3 tail = ent.origin + edge.tail;
+			if (!PassesFilters(settings, ent))
+				continue;
 
-				file << "trig.edges.append("
-					<< "Vector(" << stem.x << ", " << stem.y << ", " << stem.z << "));"
-					<< "trig.edges.append(Vector(" << tail.x << ", " << tail.y << ", " << tail.z << "))\n";
+			int color[3];
+			if (!ColorOverride(settings, ent, color))
+			{
+				color[0] = BaseColorOffCoord(ent.origin.x);
+				color[1] = BaseColorOffCoord(ent.origin.y);
+				color[2] = BaseColorOffCoord(ent.origin.z);
 			}
+			if (!ent.spawnclass.empty()) writingFile << "//Spawn Class: " << ent.spawnclass << "\n";
+			if (!ent.editorclass.empty()) writingFile << "//Editor Class: " << ent.editorclass << "\n";
+			if (!ent.classname.empty()) writingFile << "//Class Name: " << ent.classname << "\n";
+			if (!ent.targetname.empty()) writingFile << "//Target Name: " << ent.targetname << "\n";
+			if (!ent.script_flag.empty()) writingFile << "//Script Flag: " << ent.script_flag << "\n";
+			if (!ent.script_name.empty()) writingFile << "//Script Name: " << ent.script_name << "\n";
+			if (!ent.scr_flagTrueAll.empty()) writingFile << "//scr_flagTrueAll: " << ent.scr_flagTrueAll << "\n";
+			if (!ent.scr_flagFalseAll.empty()) writingFile << "//scr_flagFalseAll: " << ent.scr_flagFalseAll << "\n";
+			if (!ent.scr_flagSet.empty()) writingFile << "//scr_flagSet: " << ent.scr_flagSet << "\n";
+			
+			writingFile << "{\ntrig = NewTriggerStruct()\n";
+			writingFile << "trig.origin = < " << ent.origin.x << ", " << ent.origin.y << ", " << ent.origin.z << " >\n";
+			writingFile << "trig.editorclass = \"" << ent.editorclass << "\"\n"; // istg if there's some fucking shit with " in it im exploding
+			writingFile << "trig.script_flag = \"" << ent.script_flag << "\"\n";
+			writingFile << "trig.color = <"
+				<< abs((int)ent.origin.x % 32) * 8 << ", "
+				<< abs((int)ent.origin.y % 32) * 8 << ", "
+				<< abs((int)ent.origin.z % 32) * 8 << ">\n";
+			if (ent.isTrigger && settings.drawTriggerOutlines)
+			{
+				for (Brush& brush : ent.brushes)
+				{
+					//std::cout << "\n";
+					for (Edge& edge : brush.edges)
+					{
+						Vector3 stem = ent.origin + edge.stem;
+						Vector3 tail = ent.origin + edge.tail;
+#if 1
+						Vector3 stem = ent.origin + edge.stem;
+						Vector3 tail = ent.origin + edge.tail;
+
+						writingFile << "trig.edges.append(Vector(" << stem.x << ", " << stem.y << ", " << stem.z << "));"
+							<< "trig.edges.append(Vector(" << tail.x << ", " << tail.y << ", " << tail.z << "))\n";
+#else
+						// Desmos 3D lol
+						std::cout << "["
+							<< "(" << stem.x << ", " << stem.y << ", " << stem.z << "), "
+							<< "(" << tail.x << ", " << tail.y << ", " << tail.z << ")"
+							<< "]\n";
+#endif
+					}
+				}
+			}
+			std::cout << "\n}\n";
+			// fuck off
+			/*if (settings.drawEntCubes)
+			{
+				writingFile << "script_client DebugDrawCube("
+					<< "Vector(" << ent.origin.x << ", " << ent.origin.y << ", " << ent.origin.z << "), "
+					<< "16, "
+					<< color[0] << ", "
+					<< color[1] << ", "
+					<< color[2] << ", "
+					<< (!settings.drawontop ? "true" : "false") << ", "
+					<< settings.duration << ");\n";
+			}*/
 		}
-		file << "AddTrigger(trig)\n";
-		file << "}\n";
+		std::cout << "Finished writing to " << file_without_extension << ".cfg\n";
+		writingFile.close();
 	}
-	file << "}\n";
-	file.close();
+	std::cout << "Done. Press ENTER or the X button to close.\n";
+	std::cin.get();
 }
